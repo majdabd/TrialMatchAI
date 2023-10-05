@@ -12,7 +12,6 @@ import glob
 
 import medspacy
 import spacy
-from spacy import displacy
 from spacy.matcher import PhraseMatcher
 from spacy.tokens import Span
 from spacy.language import Language
@@ -27,7 +26,8 @@ from transformers import AutoTokenizer, pipeline
 
 INPUT_FILEPATH_CT = "../data/preprocessed_data/"
 OUTPUT_FILEPATH_CT = "../data/ner_clinical_trials/"
-AUXILIARY_ENTITIES_LIST = ["Sign_symptom", "Biological_structure", "Date", "Duration", "Frequency", "Severity", "Lab_value", "Diagnostic_procedure", "Therapeutic_procedure", "Personal_background", "Clinical_event", "Outcome"]
+AUXILIARY_ENTITIES_LIST = ["Sign_symptom", "Biological_structure", "Date", "Duration", "Frequency", "Severity", "Lab_value", 
+                           "Diagnostic_procedure", "Therapeutic_procedure", "Personal_background", "Clinical_event", "Outcome"]
 
 aux_tokenizer = AutoTokenizer.from_pretrained("d4data/biomedical-ner-all")
 aux_pipeline = pipeline("ner", model="d4data/biomedical-ner-all", tokenizer= aux_tokenizer, aggregation_strategy="first", device=0)
@@ -104,7 +104,6 @@ class EntityRecognizer:
             
             if not overlap:
                 merged_list.append(dict2)
-        
         return merged_list
     
     def _find_and_remove_overlaps(self, dictionary_list, if_overlap_keep):
