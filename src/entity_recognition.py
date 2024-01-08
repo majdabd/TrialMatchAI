@@ -1,6 +1,4 @@
 import os
-os.environ['TRANSFORMERS_CACHE'] = 'models/cache/'
-
 import joblib
 from tqdm.auto import tqdm
 import requests
@@ -9,7 +7,9 @@ import requests
 import numpy as np
 import pandas as pd
 import glob
+import json
 
+import torch
 import medspacy
 import spacy
 from spacy.matcher import PhraseMatcher
@@ -23,19 +23,23 @@ import re
 from utils import get_dictionaries_with_values
 import transformers
 from transformers import AutoTokenizer, pipeline
+import warnings
 
-INPUT_FILEPATH_CT = "../data/preprocessed_data/"
+INPUT_FILEPATH = "../data/preprocessed_data/"
 OUTPUT_FILEPATH_CT = "../data/ner_clinical_trials/"
-AUXILIARY_ENTITIES_LIST = ["Sign_symptom", "Biological_structure", "Date", "Duration", "Frequency", "Severity", "Lab_value", 
-                           "Diagnostic_procedure", "Therapeutic_procedure", "Personal_background", "Clinical_event", "Outcome"]
+OUTPUT_FILEPATH_PAT = "../data/ner_patients_clinical_notes/"
+AUXILIARY_ENTITIES_LIST = ["Disease_disorder", "Sign_symptom", "Biological_structure", "Date", "Duration", "Time", "Frequency", "Severity", "Lab_value", "Dosage",
+                           "Diagnostic_procedure", "Therapeutic_procedure", "Medication", "Clinical_event", "Outcome", "History", "Subject,"
+                           "Family_history", "Detailed_description", "Area"]
 
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 aux_tokenizer = AutoTokenizer.from_pretrained("d4data/biomedical-ner-all")
-aux_pipeline = pipeline("ner", model="d4data/biomedical-ner-all", tokenizer= aux_tokenizer, aggregation_strategy="first", device=0)
+aux_pipeline = pipeline("ner", model="d4data/biomedical-ner-all", tokenizer= aux_tokenizer, aggregation_strategy="first", device=device)
 mutations_tokenizer = AutoTokenizer.from_pretrained("Brizape/tmvar-PubMedBert-finetuned-24-02")
-mutations_pipeline = pipeline("ner", model="Brizape/tmvar-PubMedBert-finetuned-24-02", tokenizer=mutations_tokenizer, aggregation_strategy="first", device=0)
+mutations_pipeline = pipeline("ner", model="Brizape/tmvar-PubMedBert-finetuned-24-02", tokenizer=mutations_tokenizer, aggregation_strategy="first",  device=device)
 
 def query_plain(text, url="http://localhost:8888/plain"):
-    return requests.post(url, json={'text': text}).json()
+    return json.loads(requests.post(url, json={'text': text}).content.decode('utf-8'))
 
 memory = joblib.Memory(".")
 def ParallelExecutor(use_bar="tqdm", **joblib_args):
@@ -57,19 +61,64 @@ def ParallelExecutor(use_bar="tqdm", **joblib_args):
         return tmp
     return aprun
 
+
+def add_custom_entity(doc, entity):
+    entity["text"] = re.sub(r'([,.-])\s+', r'\1', entity["text"]) 
+    # print(entity["text"])
+    entity_text = entity["text"].lower()
+    start_char = entity["start"] 
+    end_char = entity["end"] 
+    # Find the token indices corresponding to the character span
+    start_indices = [i for i, token in enumerate(doc) if (start_char <= token.idx <= end_char) or (entity_text in token.text and token.idx <= start_char)]
+    if start_indices:
+    # You can choose the first matching window or handle multiple matches
+        start_index = start_indices[0]
+        start_token = doc[start_index]
+        end_index = min(start_index + len(entity_text.split()) - 1, len(doc) - 1)
+        end_token = doc[end_index]
+        # print(doc[start_token.i:end_token.i + 1])
+        doc.set_ents([Span(doc, start_token.i, end_token.i + 1, entity["entity_group"])])
+        
+    return doc
+
+def negation_handling(sentence, entity):
+    nlp = spacy.load("en_core_web_sm", disable={"ner"})
+    doc = nlp(sentence.lower())
+    nlp = medspacy.load(nlp)
+    nlp.disable_pipe('medspacy_target_matcher')
+    nlp.disable_pipe('medspacy_pyrush')
+    doc = nlp(add_custom_entity(doc, entity))
+    for e in doc.ents:
+        rs = str(e._.is_negated)
+        if rs:
+            if rs == "True": 
+                entity["is_negated"] = "yes"
+            elif rs == 'False':
+                entity["is_negated"] = "no"
+        else:
+            entity["is_negated"] = "no"
+    return  entity 
+
 class EntityRecognizer:
-    def __init__(self, id_list, n_jobs):
+    def __init__(self, id_list, n_jobs, data_source="clinical trials"):
         self.id_list = id_list
         self.n_jobs = n_jobs
+        self.data_source = data_source
         
-    def _data_loader(self, id_list):
+    def data_loader(self, id_list):
         to_concat = []
         for idx in id_list:
-            df = pd.read_csv(INPUT_FILEPATH_CT + "%s_preprocessed.csv"%idx)
-            to_concat.append(df)
+            if self.data_source=="clinical trials":
+                df = pd.read_csv(INPUT_FILEPATH + "clinical_trials/" + "%s_preprocessed.csv"%idx)
+                to_concat.append(df)
+            elif self.data_source=="patient notes":
+                df = pd.read_csv(INPUT_FILEPATH + "patient_notes/" + "%s_preprocessed.csv"%idx)
+                to_concat.append(df)
+            else:
+                warnings.warn("Unexpected data source encountered. Please choose between 'clinical trials' or 'patient notes'", UserWarning)
         return to_concat
     
-    def _mtner_normalize_format(self, json_data):
+    def mtner_normalize_format(self, json_data):
         spacy_format_entities = []
         for annotation in json_data["annotations"]:
             start = annotation["span"]["begin"]
@@ -92,9 +141,8 @@ class EntityRecognizer:
         }
         return spacy_result
     
-    def _merge_lists_with_priority_to_first(self, list1, list2):
+    def merge_lists_with_priority_to_first(self, list1, list2):
         merged_list = list1.copy()  # Create a copy of list1 to preserve its contents
-        
         for dict2 in list2:
             overlap = False
             for dict1 in list1:
@@ -106,7 +154,13 @@ class EntityRecognizer:
                 merged_list.append(dict2)
         return merged_list
     
-    def _find_and_remove_overlaps(self, dictionary_list, if_overlap_keep):
+    def merge_lists_without_priority(self, list1, list2):
+        merged_list = list1.copy()  # Create a copy of list1 to preserve its contents
+        for dict2 in list2:
+            merged_list.append(dict2)
+        return merged_list
+    
+    def find_and_remove_overlaps(self, dictionary_list, if_overlap_keep):
         # Create a dictionary to store non-overlapping entries
         non_overlapping = {}
         # Create a set of entity groups to keep
@@ -129,38 +183,8 @@ class EntityRecognizer:
         result_list = list(non_overlapping.values())
 
         return result_list
-
-    def negation_handling(self, sentence, entity):
-        nlp = spacy.load("en_core_web_sm", disable={"ner"})
-        nlp = medspacy.load(nlp)
-        nlp.disable_pipe('medspacy_target_matcher')
-        nlp.disable_pipe('medspacy_pyrush')
-        @Language.component("add_custom_entity")
-        def add_cutom_entity(doc):
-            start_char = doc.text.find(entity["text"])
-            end_char = start_char + len(entity["text"]) - 1  # Subtract 1 to get the inclusive end position
-            start_token = None
-            end_token = None
-            # Find the corresponding tokens for the start and end positions
-            for token in doc:
-                if token.idx <= start_char < token.idx + len(token.text) and start_token is None:
-                    start_token = token
-                if token.idx <= end_char <= token.idx + len(token.text) and end_token is None:
-                    end_token = token
-                if start_token is not None and end_token is not None:
-                    doc.set_ents([Span(doc, start_token.i, end_token.i + 1, entity["entity_group"])]) 
-            return doc
-        nlp.add_pipe("add_custom_entity", before='medspacy_context') 
-        doc = nlp(sentence)
-        for e in doc.ents:
-            rs = str(e._.is_negated)
-            if rs == "True": 
-                entity["is_negated"] = "yes"
-            else:
-                entity["is_negated"] = "no"
-        return  entity 
     
-    def aberration_recognizer(self, text):
+    def aberration_type_recognizer(self, text):
         med_nlp = medspacy.load()
         med_nlp.disable_pipe('medspacy_target_matcher')
         @Language.component("aberrations-ner")
@@ -201,65 +225,144 @@ class EntityRecognizer:
                             "is_negated" : "yes" if entity._.is_negated else "no"})
         return ent_list
     
+    
+    def pregnancy_recognizer(self, text):
+        med_nlp = medspacy.load()
+        med_nlp.disable_pipe('medspacy_target_matcher')
+        
+        # Updated regex pattern
+        regex_pattern = r"(?i)\b(?:pregn\w+|matern\w+|gestat\w+|lactat\w+|breastfeed\w+|prenat\w+|antenat\w+|postpartum|childbear\w+|parturient|conceiv\w+|obstetr\w+)\b"
+
+        @Language.component("pregnancy-ner")
+        def regex_pattern_matcher_for_pregnancy(doc):
+            compiled_pattern = re.compile(regex_pattern)
+
+            original_ents = list(doc.ents)
+            mwt_ents = []
+
+            for match in re.finditer(compiled_pattern, doc.text):
+                start, end = match.span()
+                span = doc.char_span(start, end)
+                if span is not None:
+                    mwt_ents.append((span.start, span.end, span.text))
+
+            for ent in mwt_ents:
+                start, end, name = ent
+                per_ent = Span(doc, start, end, label="pregnancy")  # Assigning the label "pregnancy"
+                original_ents.append(per_ent)
+
+            doc.ents = filter_spans(original_ents)
+
+            return doc
+
+        med_nlp.add_pipe("pregnancy-ner", before='medspacy_context')
+        doc = med_nlp(text)
+        
+        ent_list =[] 
+        for entity in doc.ents:
+            ent_list.append({
+                "entity_group": entity.label_,
+                "text": entity.text,
+                "start": entity.start_char,
+                "end": entity.end_char,
+                "is_negated": "yes" if entity._.is_negated else "no"
+            })
+    
+        return ent_list
+    
+    def merge_similar_consecutive_entities(self, entities):
+        combined_entities = []
+        if entities:
+            current_entity = entities[0]
+            for next_entity in entities[1:]:
+                if (
+                    current_entity['entity_group'] == next_entity['entity_group']
+                    and next_entity['start'] - current_entity['end'] - 1 <= 3
+                ):
+                    current_entity['text'] += ' ' + next_entity['text']
+                    current_entity['end'] = next_entity['end']
+                else:
+                    combined_entities.append(current_entity)
+                    current_entity = next_entity
+
+            combined_entities.append(current_entity)
+        return combined_entities
+
+    
     def recognize_entities(self, df):
-        nct_ids = []
+        _ids = []
         sentences = []
         entities_groups = []
         entities_texts = []
         normalized_ids = []
         is_negated = []
-        criteria = []
+        field = []
+        start= []
+        end = []
+        df = df.dropna()
         for _,row in df.iterrows():
-            sent = row["sentence"]
-            # print(sent)
-            main_entities = self._mtner_normalize_format(query_plain(sent))["ents"]
+            sent = row["sentence"].replace(",", "")
+            main_entities = self.mtner_normalize_format(query_plain(sent.lower()))["ents"]
             variants_entities = mutations_pipeline(sent)
-            aberration_entities = self.aberration_recognizer(sent)
+            aberration_type_entities = self.aberration_type_recognizer(sent)
+            pregnancy_entities = self.pregnancy_recognizer(sent)
             aux_entities = aux_pipeline(sent)
             aux_entities = get_dictionaries_with_values(aux_entities, "entity_group", AUXILIARY_ENTITIES_LIST)
             aux_entities = [{"text" if k == "word" else k: v for k, v in d.items()} for d in aux_entities]
-            # print(aux_entities)
-            combined_entities = self._merge_lists_with_priority_to_first(variants_entities, main_entities)
-            combined_entities  = self._merge_lists_with_priority_to_first(combined_entities, aux_entities)
-            combined_entities = self._merge_lists_with_priority_to_first(combined_entities, aberration_entities)
-            # print(combined_entities)
+            
+            combined_entities  = self.merge_lists_with_priority_to_first(variants_entities, main_entities)
+            combined_entities  = self.merge_lists_without_priority(combined_entities, aux_entities)
+            combined_entities  = self.merge_lists_without_priority(combined_entities, pregnancy_entities)
+            combined_entities  = self.merge_lists_with_priority_to_first(combined_entities, aberration_type_entities)
+            combined_entities  = self.merge_similar_consecutive_entities(combined_entities)
+            
             # Convert the selected_entries dictionary back to a list
             if len(combined_entities) > 0:
-                clean_entities = self._find_and_remove_overlaps(combined_entities, if_overlap_keep=["gene", "ProteinMutation", "DNAMutation", "SNP"])
-                for ent in clean_entities:
-                    if ("score" in ent and ent["score"] > 0.5) or ("score" not in ent):
-                        ent = self.negation_handling(sent, ent)
+                clean_entities = self.find_and_remove_overlaps(combined_entities, if_overlap_keep=["gene", "ProteinMutation", "DNAMutation", "SNP"])
+                for e in clean_entities:
+                    if (("score" in e and e["score"] > 0.6) or ("score" not in e)) and len(e["text"]) > 1:
+                        ent = negation_handling(sent, e)
+                        ent["text"] = re.sub(r'([,.-])\s+', r'\1', e["text"]) 
                         is_negated.append(ent["is_negated"]) 
-                        nct_ids.append(row["nct_id"])
+                        _ids.append(row["id"])
                         sentences.append(sent)
                         entities_groups.append(ent['entity_group'])
                         entities_texts.append(ent['text'])
+                        start.append(ent["start"])
+                        end.append(ent["end"])
                         if "normalized_id" in ent:
                             normalized_ids.append(ent["normalized_id"])
                         else: 
                             normalized_ids.append("CUI-less")
-                        criteria.append(row["criteria"])
+                        if self.data_source=="clinical trials":
+                            field.append(row["criteria"])
+                        elif self.data_source=="patient notes":
+                            field.append(row["field"])
                     else:
-                            continue
+                        continue
         return pd.DataFrame({
-                            'nct_id': nct_ids,
+                            '_id': _ids,
                             'sentence': sentences,
                             'entity_text': entities_texts,
                             'entity_group': entities_groups,
                             'normalized_id': normalized_ids,
-                            'criteria' : criteria,
-                            "is_negated" : is_negated
+                            'field' : field,
+                            "is_negated" : is_negated,
+                            'start':start,
+                            'end':end
                         })
             
     def __call__(self):
-        df = self._data_loader(self.id_list)
+        all_df = self.data_loader(self.id_list)
         parallel_runner = ParallelExecutor(n_jobs=self.n_jobs)(total=len(self.id_list))
         X = parallel_runner(
             joblib.delayed(self.recognize_entities)(
-            ct_df, 
+            df, 
             )
-            for ct_df in df
+            for df in all_df
         )     
-        all_trials = pd.concat(X)
-        all_trials.to_csv(OUTPUT_FILEPATH_CT + "entities_parsed.csv")
-        return all_trials
+        if self.data_source=="clinical_trials":
+            pd.concat(X).to_csv(OUTPUT_FILEPATH_CT + "entities_parsed.csv", index = False)
+        elif self.data_source=="patient notes":
+            pd.concat(X).to_csv(OUTPUT_FILEPATH_PAT + "entities_parsed.csv", index = False)
+        return pd.concat(X)

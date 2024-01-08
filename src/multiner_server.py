@@ -5,17 +5,17 @@ import requests
 
 def start_multiner_server():
     current_directory = os.getcwd()
-    run_path = "../resources/BERN2/scripts/run_bern2.sh"
-    stop_path = "../resources/BERN2/scripts/stop_bern2.sh"
     working_directory = "../resources/BERN2/scripts/"
     os.chdir(working_directory)
+    run_path = "run_bern2.sh"
+    stop_path = "stop_bern2.sh"
     print("Stopping any existing Multi-NER server instance.")
     stop_process = subprocess.Popen(["bash", stop_path], stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT)
     stop_process.wait()
-    print("Activating Mutli-NER Server. This can take between 30 seconds and 1 minute.")
+    print("Activating Mutli-NER Server... This can take approx. 1 minute")
     try:
         subprocess.Popen(["bash", run_path], stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT)
-        timeout = 60  # Adjust this value as needed
+        timeout = 120  # Adjust this value as needed
         # Define the server's URL that you want to check
         server_url = "http://localhost:8888"  # Update with the actual URL
         # Wait for the server to become available or reach the timeout
@@ -42,9 +42,9 @@ def start_multiner_server():
     
 def stop_multiner_server():
     current_directory = os.getcwd()
-    stop_path = "../resources/BERN2/scripts/stop_bern2.sh"
     working_directory = "../resources/BERN2/scripts/"
     os.chdir(working_directory)
+    stop_path = "stop_bern2.sh"
     stop_process = subprocess.Popen(["bash", stop_path], stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT)
     stop_process.wait()
     print("Multi-NER server instance terminated.")

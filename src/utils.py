@@ -10,7 +10,7 @@ def normalize_whitespace(s):
     return ' '.join(s.split())
 
 def download_study_info(nct_id, runs=2):
-    local_file_path = f"trials_texts/{nct_id}.xml"
+    local_file_path = f"../data/trials_xmls/{nct_id}.xml"
     updated_cts = []
     for _ in range(runs):
         if os.path.exists(local_file_path):
@@ -127,13 +127,13 @@ def extract_study_info(nct_id):
             Note: The extracted study information is saved in the 'trials_texts' directory.
 
     """
-    if os.path.exists(f"trials_texts/{nct_id}_info.txt"):
+    if os.path.exists(f"../data/trials_xmls/{nct_id}_info.txt"):
         return 0
         # print(f"{nct_id}_info.txt already exists. Skipping extraction.")
     else:
-        tree = ET.parse(f"trials_texts/{nct_id}.xml")
+        tree = ET.parse(f"../data/trials_xmls/{nct_id}.xml")
         root = tree.getroot()
-        with open(f"trials_texts/{nct_id}_info.txt", "w") as f:
+        with open(f"../data/trials_xmls/{nct_id}_info.txt", "w") as f:
             
             # Extract Long title
             official_title = root.find(".//official_title")
@@ -561,10 +561,10 @@ def replace_parentheses_with_braces(text):
     stack = []
     result = ""
     for char in text:
-        if char == '(':
+        if char == '(' or char == '[':
             stack.append(char)
             result += "{"
-        elif char == ')':
+        elif char == ')' or char == "]":
             if stack:
                 stack.pop()
                 result += "}"

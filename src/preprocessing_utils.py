@@ -22,7 +22,7 @@ import gzip, tarfile
 
 REGEX_FILE  = utils.load_regex_patterns("../data/regex_patterns.json")
 EXCEPTIONS_FILE = utils.load_regex_patterns("../data/exception_regex_patterns.json")
-PREPROCESSED_TRIALS_OUTPUT_FILEPATH = "../data/preprocessed_data/"
+PREPROCESSED_OUTPUT_FILEPATH = "../data/preprocessed_data/clinical_trials/"
 
 
 def extract_eligibility_criteria(trial_id):
@@ -489,20 +489,20 @@ def extract_iec_preprocessed(text, regex_patterns):
     return criteria
 
 
-def eic_text_preprocessing(nct_ids, regex_patterns = REGEX_FILE):
+def eic_text_preprocessing(_ids, regex_patterns = REGEX_FILE):
     """
     Main preprocessing function for eligibility criteria text from a list of clinical trial IDs.
 
-    This function takes a list of clinical trial IDs (nct_ids) and preprocesses the eligibility criteria text
+    This function takes a list of clinical trial IDs (_ids) and preprocesses the eligibility criteria text
     for each trial. It uses the provided regex patterns to extract Inclusion Criteria and Exclusion Criteria from the text.
 
     Parameters:
-        nct_ids (list): A list of clinical trial IDs for which eligibility criteria text will be preprocessed.
+        _ids (list): A list of clinical trial IDs for which eligibility criteria text will be preprocessed.
         regex_patterns (dict): A dictionary containing regular expression patterns used for preprocessing.
 
     Returns:
         pandas.DataFrame: A DataFrame containing the preprocessed eligibility criteria text with columns
-        "sentence," "criteria," "sub_criteria," and "nct_id."
+        "sentence," "criteria," "sub_criteria," and "_id."
 
     Note:
     The function calls extract_eligibility_criteria to obtain the eligibility criteria text for each trial.
@@ -518,7 +518,7 @@ def eic_text_preprocessing(nct_ids, regex_patterns = REGEX_FILE):
     regex_list = list(regex_patterns.values())
     texts  = []
     trial_id = []
-    for i, nid in enumerate(nct_ids):
+    for _, nid in enumerate(_ids):
         eic_text = extract_eligibility_criteria(nid)
         if eic_text:
             texts.append(extract_iec_preprocessed(eic_text, regex_list))
@@ -528,25 +528,25 @@ def eic_text_preprocessing(nct_ids, regex_patterns = REGEX_FILE):
     to_concat = []
     for index, item in enumerate(texts):
         iterator = islice(item.items(), 2)
-        nct_id = trial_id[index]  # Get the NCT ID for the current item
+        _id = trial_id[index]  # Get the NCT ID for the current item
         for key, value in iterator:
             if isinstance(value, dict):  # Check if the value is a dictionary
                 for sub_key, sub_value in value.items():
                     df = pd.DataFrame(sub_value, columns=["sentence"])
                     df["criteria"] = key
                     df["sub_criteria"] = sub_key
-                    df["nct_id"] = nct_id
+                    df["id"] = _id
                     to_concat.append(df)
             else:
                 df = pd.DataFrame(value, columns=["sentence"])
                 df["criteria"] = key
                 df["sub_criteria"] = key  # Use key as sub-criteria when value is not a dictionary
-                df["nct_id"] = nct_id
+                df["id"] = _id
                 to_concat.append(df)
     if to_concat:
         final_df = pd.concat(to_concat)
         final_df['sentence'] = final_df['sentence'].apply(drop_leading_character, regex_patterns=regex_list)
-        final_df.to_csv(PREPROCESSED_TRIALS_OUTPUT_FILEPATH + "%s_preprocessed.csv"%nct_ids[0])
+        final_df.to_csv(PREPROCESSED_OUTPUT_FILEPATH + "%s_preprocessed.csv"%_ids[0])
         return final_df
     else:
         return None
